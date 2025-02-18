@@ -212,6 +212,14 @@ if __name__ == '__main__':
     elif model_type == 'hunyuan-video':
         from models import hunyuan_video
         model = hunyuan_video.HunyuanVideoPipeline(config)
+    elif model_type == 'skyreels_v1_i2v':
+        config['model']['is_i2v'] = True
+        from models import skyreels_v1
+        model = skyreels_v1.SkyreelsVideoPipeline(config)
+    elif model_type == 'skyreels_v1_t2v':
+        config['model']['is_i2v'] = False
+        from models import skyreels_v1
+        model = skyreels_v1.SkyreelsVideoPipeline(config)
     elif model_type == 'sdxl':
         from models import sdxl
         model = sdxl.SDXLPipeline(config)
