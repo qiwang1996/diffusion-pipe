@@ -1,16 +1,13 @@
 from models.hunyuan_video import HunyuanVideoPipeline, get_rotary_pos_embed
-from models.hunyuan_video import InitialLayer, DoubleBlock, concatenate_hidden_states, SingleBlock, OutputLayer
 from models.hunyuan_video import init_empty_weights, load_model, load_safetensors, _convert_state_dict_keys, load_state_dict, set_module_tensor_to_device
 import torch
-from utils.common import AUTOCAST_DTYPE
-import torch.nn.functional as F
 
 def get_cond_latents(
     latents
 ):  
     batch_size, num_channels_latents, num_frames, height, width  = latents.shape
 
-    first_frame_latents = latents[:, :, 0, ...]
+    first_frame_latents = latents[:, :, [0], ...]
 
     device, dtype = latents.device, latents.dtype
 
@@ -25,37 +22,7 @@ def get_cond_latents(
     latent_padding = torch.zeros(padding_shape, device=device, dtype=dtype)
     cond_image_latents = torch.cat([first_frame_latents, latent_padding], dim=2)
     return cond_image_latents
-
-
-class SkyReelOutputLayer(OutputLayer):
-    def __init__(self, transformer, is_i2v):
-        super().__init__(transformer)
-        self.is_i2v = is_i2v
-
-    @torch.autocast('cuda', dtype=AUTOCAST_DTYPE)
-    def forward(self, inputs):
-        x, vec, cu_seqlens, max_seqlen, freqs_cos, freqs_sin, txt_seq_len, img_seq_len, unpatchify_args, target = inputs
-        img = x[:, :img_seq_len.item(), ...]
-
-        # ---------------------------- Final layer ------------------------------
-        img = self.final_layer(img, vec)  # (N, T, patch_size ** 2 * out_channels)
-
-        tt, th, tw = (arg.item() for arg in unpatchify_args)
-        output = self.transformer[0].unpatchify(img, tt, th, tw)
-
-        with torch.autocast('cuda', enabled=False):
-            output = output.to(torch.float32)
-            target = target.to(torch.float32)
-
-            if self.is_i2v:
-                num_channels = output.shape[1] // 2
-                loss = F.mse_loss(output[:, :num_channels, ...], target)
-            else:
-                loss = F.mse_loss(output, target)
-                
-        return loss
-
-
+ 
 class SkyreelsVideoPipeline(HunyuanVideoPipeline):
     def __init__(self, config):
         super().__init__(config)
@@ -70,7 +37,7 @@ class SkyreelsVideoPipeline(HunyuanVideoPipeline):
 
         # only modify the following two lines comparing to hunyuan video 
         in_channels = self.args.latent_channels * 2 if self.is_i2v else self.args.latent_channels
-        out_channels = self.args.latent_channels * 2 if self.is_i2v else self.args.latent_channels
+        out_channels = self.args.latent_channels
         
         with init_empty_weights():
             transformer = load_model(
@@ -168,14 +135,3 @@ class SkyreelsVideoPipeline(HunyuanVideoPipeline):
             guidance_expand,
             target,
         )
-
-    def to_layers(self):
-        transformer = self.transformer
-        layers = [InitialLayer(transformer)]
-        for block in transformer.double_blocks:
-            layers.append(DoubleBlock(block))
-        layers.append(concatenate_hidden_states)
-        for block in transformer.single_blocks:
-            layers.append(SingleBlock(block))
-        layers.append(SkyReelOutputLayer(transformer, self.is_i2v))
-        return layers
