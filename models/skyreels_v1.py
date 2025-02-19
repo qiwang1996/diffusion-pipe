@@ -49,9 +49,10 @@ class SkyReelOutputLayer(OutputLayer):
 
             if self.is_i2v:
                 num_channels = output.shape[1] // 2
-                loss = F.mse_loss(output[:, :num_channels, ...], target[:, :num_channels, ...])
+                loss = F.mse_loss(output[:, :num_channels, ...], target)
             else:
                 loss = F.mse_loss(output, target)
+                
         return loss
 
 
@@ -101,10 +102,6 @@ class SkyreelsVideoPipeline(HunyuanVideoPipeline):
         latents = inputs['latents'].float()
         bs, channels, num_frames, h, w = latents.shape
 
-        if self.is_i2v:
-            cond_image_latents = get_cond_latents(latents)
-            latents = torch.cat([latents, cond_image_latents], dim=1)
-
         prompt_embeds_1 = inputs['prompt_embeds_1']
         prompt_attention_mask_1 = inputs['prompt_attention_mask_1']
         prompt_embeds_2 = inputs['prompt_embeds_2']
@@ -139,7 +136,12 @@ class SkyreelsVideoPipeline(HunyuanVideoPipeline):
         x_1 = latents
         x_0 = torch.randn_like(x_1)
         t_expanded = t.view(-1, 1, 1, 1, 1)
+
         x_t = (1 - t_expanded) * x_1 + t_expanded * x_0
+
+        if self.is_i2v:
+            cond_image_latents = get_cond_latents(x_t)
+            x_t = torch.cat([x_t, cond_image_latents], dim=1)
 
         target = x_0 - x_1 
  
