@@ -118,6 +118,18 @@ class SizeBucketDataset:
         )
         self.text_embedding_datasets.append(te_dataset)
 
+
+    def cache_image_embeddings(self, map_fn, regenerate_cache=False, caching_batch_size=1):
+        print(f'caching image embeddings: {self.size_bucket}')
+        self.image_embedding_dataset = _map_and_cache(
+            self.metadata_dataset,
+            map_fn,
+            self.cache_dir,
+            cache_file_prefix=f'image_embeddings_',
+            regenerate_cache=regenerate_cache,
+            caching_batch_size=caching_batch_size,
+        )
+
     def add_text_embedding_dataset(self, te_dataset):
         self.text_embedding_datasets.append(te_dataset)
 
@@ -220,6 +232,10 @@ class ARBucketDataset:
         for size_bucket_dataset in self.size_buckets:
             size_bucket_dataset.add_text_embedding_dataset(te_dataset)
 
+    def cache_image_embeddings(self, map_fn, regenerate_cache=False, caching_batch_size=1):
+        print(f'caching latents: {self.ar_frames}')
+        for ds in self.size_buckets:
+            ds.cache_latents(map_fn, regenerate_cache=regenerate_cache, caching_batch_size=caching_batch_size)
 
 class DirectoryDataset:
     def __init__(self, directory_config, dataset_config, model_name, framerate=None, skip_dataset_validation=False):
@@ -494,6 +510,11 @@ class DirectoryDataset:
         for ds in datasets:
             ds.cache_text_embeddings(map_fn, i, regenerate_cache=regenerate_cache, caching_batch_size=caching_batch_size)
 
+    def cache_image_embeddings(self, map_fn, i, regenerate_cache=False, caching_batch_size=1):
+        print(f'caching image embeddings: {self.path}')
+        datasets = self.size_bucket_datasets if self.use_size_buckets else self.ar_bucket_datasets
+        for ds in datasets:
+            ds.cache_image_embeddings(map_fn, i, regenerate_cache=regenerate_cache, caching_batch_size=caching_batch_size)
 
 # Outermost dataset object that the caller uses. Contains multiple ConcatenatedBatchedDataset. Responsible
 # for returning the correct batch for the process's data parallel rank. Calls model.prepare_inputs so the
@@ -662,9 +683,11 @@ class DatasetManager:
         self.model = model
         self.vae = self.model.get_vae()
         self.text_encoders = self.model.get_text_encoders()
-        self.submodels = [self.vae] + list(self.text_encoders)
+        self.image_encoder = self.model.get_image_encoder()
+        self.submodels = [self.vae, self.image_encoder] + list(self.text_encoders)
         self.call_vae_fn = self.model.get_call_vae_fn(self.vae)
         self.call_text_encoder_fns = [self.model.get_call_text_encoder_fn(text_encoder) for text_encoder in self.text_encoders]
+        self.call_image_encoder_fn = self.model.get_call_image_encoder_fn(self.image_encoder)
         self.regenerate_cache = regenerate_cache
         self.caching_batch_size = caching_batch_size
         self.datasets = []
@@ -743,7 +766,10 @@ class DatasetManager:
                 if i != id:
                     submodel.to('cpu')
             self.submodels[id].to('cuda')
-        if id == 0:
+        if id == -1:
+            tensor, pipe = task[1:]
+            results = self.call_image_encoder_fn(tensor)
+        elif id == 0:
             tensor, pipe = task[1:]
             results = self.call_vae_fn(tensor)
         elif id > 0:

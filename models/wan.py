@@ -13,6 +13,7 @@ from models.base import BasePipeline, PreprocessMediaFile, make_contiguous
 from utils.common import AUTOCAST_DTYPE
 #from wan.modules.t5 import T5EncoderModel
 from wan.modules.t5 import T5Encoder, T5Decoder, T5Model
+from wan.modules.clip import CLIPModel
 from wan.modules.tokenizers import HuggingfaceTokenizer
 from wan.modules.vae import WanVAE
 from wan.modules.model import WanModel, sinusoidal_embedding_1d
@@ -138,6 +139,9 @@ class WanPipeline(BasePipeline):
         ckpt_dir = self.model_config['ckpt_path']
         dtype = self.model_config['dtype']
 
+        if "i2v" in ckpt_dir.lower():
+            self.is_i2v_model = True
+
         with open(os.path.join(ckpt_dir, 'config.json')) as f:
             json_config = json.load(f)
         if json_config['model_type'] != 't2v':
@@ -159,6 +163,16 @@ class WanPipeline(BasePipeline):
             tokenizer_path=os.path.join(ckpt_dir, wan_config.t5_tokenizer),
             shard_fn=None,
         )
+
+        if self.is_i2v_model:
+            self.image_encoder = CLIPModel(
+                dtype=dtype,
+                device='cpu', 
+                checkpoint_path=os.path.join(ckpt_dir, wan_config.clip_checkpoint), 
+                tokenizer_path=os.path.join(ckpt_dir, wan_config.clip_tokenizer)
+            )
+        else:
+            self.image_encoder = None
 
         # Same here, this isn't a nn.Module.
         # TODO: by default the VAE is float32, and therefore so are the latents. Do we want to change that?
@@ -235,10 +249,20 @@ class WanPipeline(BasePipeline):
             return {'text_embeddings': text_embeddings, 'seq_lens': seq_lens}
         return fn
 
+    def get_call_image_encoder_fn(self, image_encoder):
+        def fn(image_tensor, ):
+            # Args are lists
+            p = next(image_encoder.parameters())
+            image_tensor = image_tensor.to(p.device)
+            image_embeddings = image_encoder([image_tensor])[0]
+            return {'image_embeddings': image_embeddings}
+        return fn
+
     def prepare_inputs(self, inputs, timestep_quantile=None):
         latents = inputs['latents'].float()
         # TODO: why does text_embeddings become float32 here? It's bfloat16 coming out of the text encoder.
         text_embeddings = inputs['text_embeddings']
+        image_embeddings = inputs['image_embeddings']
         seq_lens = inputs['seq_lens']
 
         bs, channels, num_frames, h, w = latents.shape
@@ -279,6 +303,7 @@ class WanPipeline(BasePipeline):
             t,
             text_embeddings,
             seq_lens,
+            image_embeddings,
             target,
         )
 
@@ -294,7 +319,7 @@ class WanPipeline(BasePipeline):
 class InitialLayer(nn.Module):
     def __init__(self, model):
         super().__init__()
-        assert model.model_type != 'i2v'
+
         self.patch_embedding = model.patch_embedding
         self.time_embedding = model.time_embedding
         self.text_embedding = model.text_embedding
@@ -311,7 +336,7 @@ class InitialLayer(nn.Module):
             if torch.is_floating_point(item):
                 item.requires_grad_(True)
 
-        x, t, context, text_seq_lens, target = inputs
+        x, t, context, text_seq_lens, cond_image_emb, target = inputs
         context = [emb[:length] for emb, length in zip(context, text_seq_lens)]
 
         device = self.patch_embedding.weight.device
